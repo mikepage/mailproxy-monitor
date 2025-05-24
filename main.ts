@@ -51,19 +51,19 @@ async function smtpSubmissionTest() {
 
   // Read greeting
   let respLines = await readSmtpResponse(reader);
-  console.log("S:", respLines.join("\nS: "));
+  console.log(respLines.join("\n"));
 
   // EHLO
   await writeLine(writer, "EHLO localhost");
-  console.log("C: EHLO localhost");
+  console.log("EHLO localhost");
   respLines = await readSmtpResponse(reader);
-  console.log("S:", respLines.join("\nS: "));
+  console.log(respLines.join("\nS"));
 
   // STARTTLS
   await writeLine(writer, "STARTTLS");
-  console.log("C: STARTTLS");
+  console.log("STARTTLS");
   respLines = await readSmtpResponse(reader);
-  console.log("S:", respLines.join("\nS: "));
+  console.log(respLines.join("\n"));
 
   if (!respLines[0].startsWith("220")) {
     console.error("STARTTLS failed");
@@ -76,23 +76,29 @@ async function smtpSubmissionTest() {
   writer.releaseLock();
 
   // Upgrade to TLS
-  const tlsConn = await Deno.startTls(conn, { hostname });
-  const tlsReader = tlsConn.readable.getReader();
-  const tlsWriter = tlsConn.writable.getWriter();
+  try {
+    const tlsConn = await Deno.startTls(conn, { hostname });
 
-  // EHLO again after TLS
-  await writeLine(tlsWriter, "EHLO localhost");
-  console.log("C: EHLO localhost");
-  respLines = await readSmtpResponse(tlsReader);
-  console.log("S:", respLines.join("\nS: "));
+    const tlsReader = tlsConn.readable.getReader();
+    const tlsWriter = tlsConn.writable.getWriter();
 
-  // QUIT
-  await writeLine(tlsWriter, "QUIT");
-  console.log("C: QUIT");
-  respLines = await readSmtpResponse(tlsReader);
-  console.log("S:", respLines.join("\nS: "));
+    // EHLO again after TLS
+    await writeLine(tlsWriter, "EHLO localhost");
+    console.log("EHLO localhost");
+    respLines = await readSmtpResponse(tlsReader);
+    console.log(respLines.join("\n"));
 
-  tlsConn.close();
+    // QUIT
+    await writeLine(tlsWriter, "QUIT");
+    console.log("QUIT");
+    respLines = await readSmtpResponse(tlsReader);
+    console.log(respLines.join("\n"));
+
+    tlsConn.close();
+  } catch (error) {
+    console.error("TLS handshake failed");
+    return;
+  }
 }
 
 if (Deno.args.length === 0) {
