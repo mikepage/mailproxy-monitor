@@ -17,14 +17,10 @@ async function readSmtpResponse(
       buffer = buffer.slice(lineEndIndex + 2);
       lines.push(line);
 
-      // Check if this is the last line of multiline response
-      // Format: "xyz-" means more lines coming
-      //          "xyz " means last line
       if (line.length >= 4) {
         const code = line.slice(0, 3);
         const delim = line[3];
         if (/^\d{3}$/.test(code) && delim === " ") {
-          // End of multiline response
           return lines;
         }
       }
@@ -40,44 +36,86 @@ async function writeLine(
   await writer.write(encoder.encode(line + "\r\n"));
 }
 
-async function smtpSubmissionTest() {
-  const hostname = Deno.args[0];
-  const port = 587;
-
-  console.log(`Connecting to ${hostname}:${port}...`);
+async function smtpSubmissionTestImplicitTls(hostname: string, port: number) {
+  console.log(`Connecting to ${hostname}:${port} with implicit TLS...`);
   const conn = await Deno.connect({ hostname, port });
-  const reader = conn.readable.getReader();
-  const writer = conn.writable.getWriter();
 
-  // Read greeting
-  let respLines = await readSmtpResponse(reader);
-  console.log(respLines.join("\n"));
-
-  // EHLO
-  await writeLine(writer, "EHLO localhost");
-  console.log("EHLO localhost");
-  respLines = await readSmtpResponse(reader);
-  console.log(respLines.join("\nS"));
-
-  // STARTTLS
-  await writeLine(writer, "STARTTLS");
-  console.log("STARTTLS");
-  respLines = await readSmtpResponse(reader);
-  console.log(respLines.join("\n"));
-
-  if (!respLines[0].startsWith("220")) {
-    console.error("STARTTLS failed");
+  let tlsConn;
+  try {
+    tlsConn = await Deno.startTls(conn, { hostname });
+  } catch (err) {
+    console.error("TLS handshake failed:", err);
     conn.close();
     return;
   }
 
-  // Release old plain TCP stream locks
-  reader.releaseLock();
-  writer.releaseLock();
+  const reader = tlsConn.readable.getReader();
+  const writer = tlsConn.writable.getWriter();
 
-  // Upgrade to TLS
   try {
-    const tlsConn = await Deno.startTls(conn, { hostname });
+    let resp = await readSmtpResponse(reader);
+    console.log(resp.join("\n"));
+
+    await writeLine(writer, "EHLO localhost");
+    console.log("EHLO localhost");
+    resp = await readSmtpResponse(reader);
+    console.log(resp.join("\n"));
+
+    await writeLine(writer, "QUIT");
+    console.log("QUIT");
+    resp = await readSmtpResponse(reader);
+    console.log(resp.join("\n"));
+  } catch (err) {
+    console.error("SMTP conversation error:", err);
+  } finally {
+    reader.releaseLock();
+    writer.releaseLock();
+    tlsConn.close();
+  }
+}
+
+async function smtpSubmissionTestStartTls(hostname: string, port: number) {
+  console.log(`Connecting to ${hostname}:${port} with STARTTLS...`);
+  const conn = await Deno.connect({ hostname, port });
+
+  const reader = conn.readable.getReader();
+  const writer = conn.writable.getWriter();
+
+  try {
+    // Greeting
+    let resp = await readSmtpResponse(reader);
+    console.log(resp.join("\n"));
+
+    // EHLO
+    await writeLine(writer, "EHLO localhost");
+    console.log("EHLO localhost");
+    resp = await readSmtpResponse(reader);
+    console.log(resp.join("\n"));
+
+    // STARTTLS command
+    await writeLine(writer, "STARTTLS");
+    console.log("STARTTLS");
+    resp = await readSmtpResponse(reader);
+    console.log(resp.join("\n"));
+
+    if (!resp[0].startsWith("220")) {
+      console.error("STARTTLS not supported or failed");
+      conn.close();
+      return;
+    }
+
+    // Release locks before TLS upgrade
+    reader.releaseLock();
+    writer.releaseLock();
+
+    let tlsConn;
+    try {
+      tlsConn = await Deno.startTls(conn, { hostname });
+    } catch (err) {
+      console.error("TLS handshake failed:", err);
+      conn.close();
+      return;
+    }
 
     const tlsReader = tlsConn.readable.getReader();
     const tlsWriter = tlsConn.writable.getWriter();
@@ -85,25 +123,42 @@ async function smtpSubmissionTest() {
     // EHLO again after TLS
     await writeLine(tlsWriter, "EHLO localhost");
     console.log("EHLO localhost");
-    respLines = await readSmtpResponse(tlsReader);
-    console.log(respLines.join("\n"));
+    resp = await readSmtpResponse(tlsReader);
+    console.log(resp.join("\n"));
 
     // QUIT
     await writeLine(tlsWriter, "QUIT");
     console.log("QUIT");
-    respLines = await readSmtpResponse(tlsReader);
-    console.log(respLines.join("\n"));
+    resp = await readSmtpResponse(tlsReader);
+    console.log(resp.join("\n"));
 
+    tlsReader.releaseLock();
+    tlsWriter.releaseLock();
     tlsConn.close();
-  } catch (error) {
-    console.error("TLS handshake failed");
-    return;
+  } catch (err) {
+    console.error("SMTP error:", err);
+    conn.close();
   }
 }
 
-if (Deno.args.length === 0) {
-  console.error("Usage: deno run --allow-net script.ts <hostname>");
-  Deno.exit(1);
+async function main() {
+  if (Deno.args.length < 2) {
+    console.error("Usage: deno run --allow-net main.ts <hostname> <port>");
+    Deno.exit(1);
+  }
+  const hostname = Deno.args[0];
+  const port = Number(Deno.args[1]);
+
+  if (port === 465) {
+    await smtpSubmissionTestImplicitTls(hostname, port);
+  } else if (port === 587) {
+    await smtpSubmissionTestStartTls(hostname, port);
+  } else {
+    console.error(
+      `Unsupported port ${port}. Use 465 for implicit TLS or 587 for STARTTLS.`,
+    );
+    Deno.exit(1);
+  }
 }
 
-smtpSubmissionTest();
+main();
